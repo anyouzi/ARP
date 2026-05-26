@@ -1,0 +1,59 @@
+{
+  "name": "匹配点击跳出",
+  "codes": [
+    {
+      "code_id": 1,
+      "first_value": 1,
+      "second_value": 1,
+      "image_path": "",
+      "threshold": 0.9,
+      "click_x": 0,
+      "click_y": 0,
+      "sleep_time": 0,
+      "key_code": 0,
+      "swipe_x_1": 0,
+      "swipe_y_1": 0,
+      "swipe_x_2": 0,
+      "swipe_y_2": 0,
+      "swipe_time": 300,
+      "text": "",
+      "time_out": 0
+    },
+    {
+      "code_id": 1,
+      "first_value": 0,
+      "second_value": 5,
+      "image_path": "",
+      "threshold": 0.9,
+      "click_x": 0,
+      "click_y": 0,
+      "sleep_time": 300,
+      "key_code": 0,
+      "swipe_x_1": 0,
+      "swipe_y_1": 0,
+      "swipe_x_2": 0,
+      "swipe_y_2": 0,
+      "swipe_time": 300,
+      "text": "",
+      "time_out": 0
+    },
+    {
+      "code_id": 1,
+      "first_value": 1,
+      "second_value": 6,
+      "image_path": "",
+      "threshold": 0.9,
+      "click_x": 0,
+      "click_y": 0,
+      "sleep_time": 0,
+      "key_code": 0,
+      "swipe_x_1": 0,
+      "swipe_y_1": 0,
+      "swipe_x_2": 0,
+      "swipe_y_2": 0,
+      "swipe_time": 300,
+      "text": "",
+      "time_out": 0
+    }
+  ]
+}

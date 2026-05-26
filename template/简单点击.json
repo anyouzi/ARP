@@ -1,0 +1,12 @@
+{
+  "name": "简单点击",
+  "codes": [
+    {
+      "first_value": 1,
+      "second_value": 1,
+      "image_path": "",
+      "threshold": 0.9,
+      "comment": "匹配到目标->点击"
+    }
+  ]
+}

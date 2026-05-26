@@ -1,0 +1,12 @@
+{
+  "name": "等待并退出",
+  "codes": [
+    {
+      "first_value": 1,
+      "second_value": 6,
+      "image_path": "",
+      "threshold": 0.95,
+      "comment": "匹配到目标->退出循环"
+    }
+  ]
+}
