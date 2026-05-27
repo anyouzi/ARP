@@ -140,8 +140,8 @@
           "codes": [
             {
               "code_id": 1,
-              "first_value": 0,
-              "second_value": 8,
+              "first_value": 2,
+              "second_value": 7,
               "image_path": "",
               "threshold": 0.9,
               "click_x": 0,
@@ -153,7 +153,7 @@
               "swipe_x_2": 0,
               "swipe_y_2": 0,
               "swipe_time": 300,
-              "text": "",
+              "text": "其他方式登录",
               "time_out": 0
             }
           ]

@@ -625,17 +625,63 @@ class WorkflowEditor:
     def _code_dialog(self, existing):
         dlg = tk.Toplevel(self.root)
         dlg.title("编辑指令" if existing else "新建指令")
-        dlg.geometry("460x480")
+        dlg.geometry("700x500")
         dlg.resizable(False, False)
 
-        vals = existing or {"first_value": 1, "second_value": 1, "image_path": "",
-                            "threshold": 0.9, "click_x": 0, "click_y": 0,
-                            "sleep_time": 0, "key_code": 0}
+        # 默认值补全所有字段
+        default_vals = {"first_value": 1, "second_value": 1, "image_path": "",
+                        "threshold": 0.9, "click_x": 0, "click_y": 0,
+                        "sleep_time": 0, "key_code": 0,
+                        "swipe_x_1": 0, "swipe_y_1": 0, "swipe_x_2": 0, "swipe_y_2": 0,
+                        "swipe_time": 300, "text": "", "time_out": 0}
+        vals = {**default_vals, **existing} if existing else default_vals
         vars_ = {k: tk.StringVar(value=str(v)) for k, v in vals.items()}
         result = [None]
 
-        f = ttk.Frame(dlg, padding=10)
-        f.pack(fill=tk.BOTH, expand=True)
+        # 水平分割: 左侧表单 + 右侧预览
+        main = ttk.Frame(dlg, padding=10)
+        main.pack(fill=tk.BOTH, expand=True)
+
+        f = ttk.Frame(main)
+        f.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        # --- 右侧预览面板 ---
+        preview_frame = ttk.LabelFrame(main, text="模板预览", width=210, height=220)
+        preview_frame.pack(side=tk.RIGHT, fill=tk.NONE, padx=(10, 0))
+        preview_frame.pack_propagate(False)
+        preview_label = ttk.Label(preview_frame, text="选择图片后可预览",
+                                  anchor=tk.CENTER, background="#e0e0e0")
+        preview_label.pack(fill=tk.BOTH, expand=True)
+
+        def refresh_preview(path):
+            """根据图片路径刷新右侧预览图"""
+            if not path:
+                preview_label.config(image="", text="选择图片后可预览",
+                                    background="#e0e0e0")
+                return
+            full = os.path.join(self._project_root.get(), path)
+            if not os.path.isfile(full):
+                preview_label.config(image="", text=f"文件不存在:\n{path}",
+                                    background="#e0e0e0")
+                return
+            try:
+                from PIL import Image, ImageTk
+            except ImportError:
+                preview_label.config(image="", text="需安装 Pillow:\npip install Pillow",
+                                    background="#e0e0e0")
+                return
+            try:
+                img = Image.open(full)
+                img.thumbnail((190, 190), Image.LANCZOS)
+                photo = ImageTk.PhotoImage(img)
+                preview_label.config(image=photo, text="", background="white")
+                preview_label.image = photo
+            except Exception as e:
+                preview_label.config(image="", text=f"加载失败:\n{str(e)[:40]}",
+                                    background="#e0e0e0")
+
+        vars_["image_path"].trace_add("write",
+            lambda *_, p=vars_["image_path"]: refresh_preview(p.get()))
 
         ttk.Label(f, text="触发条件:", font=("", 10, "bold")).grid(row=0, column=0, sticky=tk.W)
         cb1 = ttk.Combobox(f, textvariable=vars_["first_value"],
@@ -650,7 +696,6 @@ class WorkflowEditor:
         cb2.grid(row=1, column=1, sticky=tk.EW, pady=2)
         sv = vals["second_value"]; cb2.set(f"{sv}-{self.ACT.get(sv,'?')}")
 
-        # 提示
         tip_frame = ttk.Frame(f)
         tip_frame.grid(row=2, column=0, columnspan=3, sticky=tk.EW, pady=3)
         ttk.Label(tip_frame, text="提示: 在Block末尾加 [匹配目标 → 退出循环] 即可跳转下一Block",
@@ -658,21 +703,81 @@ class WorkflowEditor:
 
         ttk.Separator(f, orient=tk.HORIZONTAL).grid(row=2, column=0, columnspan=3, sticky=tk.EW, pady=5)
 
-        ttk.Label(f, text="模板图片:").grid(row=3, column=0, sticky=tk.W, pady=2)
-        imgf = ttk.Frame(f)
-        imgf.grid(row=3, column=1, columnspan=2, sticky=tk.EW, pady=2)
-        ttk.Entry(imgf, textvariable=vars_["image_path"], width=22).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Button(imgf, text="浏览", width=5,
-                   command=lambda: self._browse_image(vars_["image_path"])).pack(side=tk.LEFT, padx=2)
-        ttk.Button(imgf, text="截图", width=5,
-                   command=lambda: self._capture_image(vars_["image_path"], dlg)).pack(side=tk.LEFT)
+        # --- 条件参数 (动态) ---
+        cond_frame = ttk.LabelFrame(f, text="条件参数", padding=5)
+        cond_frame.grid(row=3, column=0, columnspan=3, sticky=tk.EW, pady=3)
 
-        fields = [("匹配阈值:", "threshold", 8), ("点击偏移X:", "click_x", 8),
-                   ("点击偏移Y:", "click_y", 8), ("等待(ms):", "sleep_time", 8),
-                   ("按键代码:", "key_code", 8)]
-        for i, (lb, k, w) in enumerate(fields):
-            ttk.Label(f, text=lb).grid(row=4+i, column=0, sticky=tk.W, pady=2)
-            ttk.Entry(f, textvariable=vars_[k], width=w).grid(row=4+i, column=1, sticky=tk.W, pady=2)
+        # --- 动作参数 (动态) ---
+        act_frame = ttk.LabelFrame(f, text="动作参数", padding=5)
+        act_frame.grid(row=4, column=0, columnspan=3, sticky=tk.EW, pady=3)
+
+        def _mk_field(parent, label, var_name, row, width=8):
+            ttk.Label(parent, text=label).grid(row=row, column=0, sticky=tk.W, pady=2)
+            e = ttk.Entry(parent, textvariable=vars_[var_name], width=width)
+            e.grid(row=row, column=1, sticky=tk.W, pady=2, padx=(5,0))
+
+        def _mk_browse(parent, row):
+            frm = ttk.Frame(parent)
+            frm.grid(row=row, column=0, columnspan=2, sticky=tk.EW, pady=2)
+            ttk.Label(frm, text="模板图片:").pack(side=tk.LEFT)
+            ttk.Entry(frm, textvariable=vars_["image_path"], width=18).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
+            ttk.Button(frm, text="浏览", width=5,
+                       command=lambda: self._browse_image(vars_["image_path"])).pack(side=tk.LEFT)
+            ttk.Button(frm, text="截图", width=5,
+                       command=lambda: self._capture_image(vars_["image_path"], dlg)).pack(side=tk.LEFT, padx=2)
+
+        def update_cond(*_):
+            for w in cond_frame.winfo_children():
+                w.destroy()
+            try:
+                cv = int(vars_["first_value"].get().split("-")[0])
+            except:
+                cv = 1
+            if cv == 1:
+                _mk_browse(cond_frame, 0)
+                _mk_field(cond_frame, "匹配阈值:", "threshold", 1, 6)
+                refresh_preview(vars_["image_path"].get())
+            elif cv == 2:
+                _mk_field(cond_frame, "识别文字:", "text", 0, 18)
+                preview_label.config(image="", text="文字识别模式\n(无需模板图片)", background="#e0e0e0")
+            elif cv == 3:
+                _mk_field(cond_frame, "超时(ms):", "time_out", 0, 8)
+                preview_label.config(image="", text="超时模式\n(无需模板图片)", background="#e0e0e0")
+            else:
+                ttk.Label(cond_frame, text="无需额外参数", foreground="gray").grid(row=0, column=0, sticky=tk.W, pady=3)
+
+        def update_act(*_):
+            for w in act_frame.winfo_children():
+                w.destroy()
+            try:
+                av = int(vars_["second_value"].get().split("-")[0])
+            except:
+                av = 1
+            if av == 1:
+                _mk_field(act_frame, "偏移 X:", "click_x", 0)
+                _mk_field(act_frame, "偏移 Y:", "click_y", 1)
+            elif av == 2:
+                _mk_field(act_frame, "起点 X:", "swipe_x_1", 0)
+                _mk_field(act_frame, "起点 Y:", "swipe_y_1", 1)
+                _mk_field(act_frame, "终点 X:", "swipe_x_2", 2)
+                _mk_field(act_frame, "终点 Y:", "swipe_y_2", 3)
+                _mk_field(act_frame, "滑动时长(ms):", "swipe_time", 4)
+            elif av == 3:
+                _mk_field(act_frame, "偏移 X:", "click_x", 0)
+                _mk_field(act_frame, "偏移 Y:", "click_y", 1)
+                _mk_field(act_frame, "长按(ms):", "sleep_time", 2)
+            elif av == 4:
+                _mk_field(act_frame, "按键代码:", "key_code", 0)
+            elif av == 5:
+                _mk_field(act_frame, "等待(ms):", "sleep_time", 0)
+            else:
+                ttk.Label(act_frame, text="无需额外参数", foreground="gray").grid(row=0, column=0, sticky=tk.W, pady=3)
+
+        vars_["first_value"].trace_add("write", lambda *_: update_cond())
+        vars_["second_value"].trace_add("write", lambda *_: update_act())
+
+        update_cond()
+        update_act()
 
         def save():
             try:
@@ -686,20 +791,29 @@ class WorkflowEditor:
                     "click_y": int(vars_["click_y"].get()),
                     "sleep_time": int(vars_["sleep_time"].get()),
                     "key_code": int(vars_["key_code"].get()),
-                    "swipe_x_1": 0, "swipe_y_1": 0, "swipe_x_2": 0, "swipe_y_2": 0,
-                    "swipe_time": 300, "text": "", "time_out": 0,
+                    "swipe_x_1": int(vars_["swipe_x_1"].get()),
+                    "swipe_y_1": int(vars_["swipe_y_1"].get()),
+                    "swipe_x_2": int(vars_["swipe_x_2"].get()),
+                    "swipe_y_2": int(vars_["swipe_y_2"].get()),
+                    "swipe_time": int(vars_["swipe_time"].get()),
+                    "text": vars_["text"].get().strip(),
+                    "time_out": int(vars_["time_out"].get()),
                 }
                 result[0] = code
                 dlg.destroy()
             except ValueError as e:
                 messagebox.showerror("输入错误", str(e), parent=dlg)
 
-        ttk.Button(f, text="确定", command=save).grid(row=9, column=0, columnspan=3, pady=15)
+        ttk.Button(f, text="确定", command=save).grid(row=5, column=0, columnspan=3, pady=15)
         f.columnconfigure(1, weight=1)
+
+        refresh_preview(vars_["image_path"].get())
+
         dlg.transient(self.root)
         dlg.grab_set()
         self.root.wait_window(dlg)
         return result[0]
+
 
     def _browse_image(self, sv):
         path = filedialog.askopenfilename(

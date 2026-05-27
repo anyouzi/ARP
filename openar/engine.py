@@ -36,6 +36,7 @@ class TaskEngine:
         engine.run()
     """
 
+    _ocr_reader = None  # 进程级缓存, 仅初始化一次
     def __init__(self, project: ARProject, controller: AdbController):
         """
         参数:
@@ -109,6 +110,7 @@ class TaskEngine:
         """
         stop_condition = False
         times = 0
+        block_start = time.time()
 
         while not stop_condition:
             # ── 超时保护 ──
@@ -129,7 +131,8 @@ class TaskEngine:
             # ── 遍历 Block 内每条 Code ──
             for code in block.codes:
                 # 判断条件是否满足
-                if not self._check_condition(code, frame):
+                if not self._check_condition(code, frame,
+                                              int((time.time() - block_start) * 1000)):
                     continue
 
                 # 条件满足 → 执行动作 → 检查控制流返回值
@@ -146,7 +149,7 @@ class TaskEngine:
 
         return False
 
-    def _check_condition(self, code: ARCode, frame) -> bool:
+    def _check_condition(self, code: ARCode, frame, elapsed_ms: int = 0) -> bool:
         """
         判断 Code 的触发条件是否满足
 
@@ -178,12 +181,35 @@ class TaskEngine:
             return False
 
         if code.first_value == 2:
-            log_warn("文字识别 (first_value=2) 暂未实现")
-            return False
+            # ──── 文字识别 ────
+            if not code.text:
+                log_warn("文字识别: 未设置识别文本")
+                return False
+            try:
+                import easyocr
+                if TaskEngine._ocr_reader is None:
+                    log_info("    初始化 OCR 引擎 (仅首次)...")
+                    TaskEngine._ocr_reader = easyocr.Reader(
+                        ['ch_sim', 'en'], gpu=False, verbose=False)
+                results = TaskEngine._ocr_reader.readtext(frame)
+                for (bbox, txt, conf) in results:
+                    if code.text in txt:
+                        x = int((bbox[0][0] + bbox[2][0]) / 2)
+                        y = int((bbox[0][1] + bbox[2][1]) / 2)
+                        code._match_x = x
+                        code._match_y = y
+                        log_debug(f"    文字识别命中: {txt} @ ({x},{y})")
+                        return True
+                return False
+            except ImportError:
+                log_error("文字识别需要: pip install easyocr")
+                return False
 
         if code.first_value == 3:
-            log_warn("超时触发 (first_value=3) 暂未实现")
-            return False
+            # ──── 超时触发 ────
+            if code.time_out <= 0:
+                return False
+            return elapsed_ms >= code.time_out
 
         return False
 
@@ -225,12 +251,12 @@ class TaskEngine:
             )
 
         elif code.second_value == 3:
-            # ── 长按 ──
-            log_debug(f"    长按 ({code.long_click_x},{code.long_click_y}) "
-                      f"{code.long_click_time}ms")
-            self.controller.long_click(
-                code.long_click_x, code.long_click_y, code.long_click_time
-            )
+            # ---- 长按 ----
+            x = getattr(code, "_match_x", 0) + code.click_x
+            y = getattr(code, "_match_y", 0) + code.click_y
+            log_debug(f"    长按 ({x},{y}) {code.sleep_time}ms")
+            self.controller.long_click(x, y, code.sleep_time)
+
 
         elif code.second_value == 4:
             # ── 按键 ──
