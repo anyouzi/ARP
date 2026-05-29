@@ -5,23 +5,27 @@
 
 执行模型:
     对每个 Task:
-        对每个 Block (一个 Block = 一个 do-while 循环):
-            do {
+        对每个 LoopGroup (外层循环, loop_count 次或条件停止):
+            每轮循环:
                 截屏一次
-                按顺序处理 Block 内每条 Code:
-                    判断 first_value (条件) → 满足则执行 second_value (动作)
-            } while (stop_condition == False)
+                检查停止条件 (图片/文字/超时)
+                执行所有 Block (每个 Block = do-while 循环):
+                    按顺序处理 Block 内每条 Code:
+                        判断 first_value (条件) → 满足则执行 second_value (动作)
 
     控制流 Code (second_value):
         6 = stop_loop   → 跳出当前 Block 循环
         7 = return      → 结束当前 Task
         8 = exit        → 退出整个程序
+
+    全局停止: 调用 engine.stop() 或编辑器点击“停止”按钮
 """
 
 import time
+import random
 from typing import Optional, Dict
 
-from .config import ARProject, ARTask, ARBlock, ARCode
+from .config import ARProject, ARTask, ARLoopGroup, ARBlock, ARCode
 from .controller import AdbController
 from .recognition import TemplateMatcher
 from .logger import log_info, log_debug, log_error, log_warn
@@ -51,6 +55,9 @@ class TaskEngine:
         self.duration = project.duration_time   # 每轮间隔 (ms)
         self.max_times = project.run_max_times  # 最大循环次数
 
+        # 停止标志 — 外部调用 stop() 设置
+        self._stop_requested = False
+
         # 图像缓存: 加载 JSON 中所有用到的模板图
         self._image_pool: Dict[str, "np.ndarray"] = {}
         self._load_all_images()
@@ -59,45 +66,158 @@ class TaskEngine:
         """预加载 JSON 中所有引用的模板图片"""
         import cv2
         for task in self.project.tasks:
-            for block in task.blocks:
-                for code in block.codes:
-                    if code.first_value != 1:
-                        continue
-                    if code.image_path in self._image_pool:
-                        continue
-                    img = cv2.imread(code.image_path)
-                    if img is None:
-                        log_error(f"无法加载图片: {code.image_path}")
-                    else:
-                        self._image_pool[code.image_path] = img
-                        log_debug(f"已加载模板: {code.image_path}")
+            for lg in task.loop_groups:
+                for block in lg.blocks:
+                    for code in block.codes:
+                        if code.first_value != 1:
+                            continue
+                        if code.image_path in self._image_pool:
+                            continue
+                        img = cv2.imread(code.image_path)
+                        if img is None:
+                            log_error(f"无法加载图片: {code.image_path}")
+                        else:
+                            self._image_pool[code.image_path] = img
+                            log_debug(f"已加载模板: {code.image_path}")
+
+    def stop(self):
+        """设置停止标志，引擎当前循环结束后退出"""
+        self._stop_requested = True
+        log_info("收到停止请求，当前循环结束后退出...")
 
     def run(self):
         """
         按顺序执行所有 Task (对应 C++ ARLTaskPipline::play)
         """
+        self._stop_requested = False
         log_info(f"开始执行项目: {self.project.project_name}")
         log_info(f"任务数: {len(self.project.tasks)}")
 
         for task in self.project.tasks:
+            if self._stop_requested:
+                log_info("已停止，跳过剩余任务")
+                break
             self._execute_task(task)
 
         log_info("全部任务执行完毕")
 
     def _execute_task(self, task: ARTask):
         """
-        执行单个 Task (对应 C++ ARLTaskNode::play)
+        执行单个 Task — 遍历所有 LoopGroup
 
-        一个 Task 包含多个 Block, 按顺序执行。
-        如果某个 Block 触发 return (second_value=7), 则提前结束本 Task。
+        每个 LoopGroup 可以循环 N 次，也可以通过条件停止。
         """
         log_info(f"  ── 任务: {task.task_name} (ID={task.task_id}) ──")
 
-        for block in task.blocks:
-            early_return = self._execute_block(block)
+        for lg in task.loop_groups:
+            if self._stop_requested:
+                log_info(f"    已停止，跳过 LoopGroup: {lg.loop_name}")
+                return
+            early_return = self._execute_loop_group(lg)
             if early_return:
                 log_info(f"    任务 {task.task_name} 提前结束 (return)")
                 return
+
+    def _execute_loop_group(self, lg: ARLoopGroup) -> bool:
+        """
+        执行单个 LoopGroup
+
+        loop_count 次循环，每次循环执行所有 Block。
+        可以通过停止条件提前跳出。
+
+        返回: True=触发 return, False=正常结束
+        """
+        log_info(f"    ── 循环组: {lg.loop_name} ──")
+        loop_start_time = time.time()
+        iteration = 0
+
+        while True:
+            if self._stop_requested:
+                log_info(f"      循环组 {lg.loop_name} 收到停止请求")
+                return False
+
+            iteration += 1
+
+            # 每轮间隔
+            time.sleep(self.duration / 1000.0)
+
+            # 截屏一次 (构建 loop 内共用的 frame)
+            frame = self.controller.screencap()
+            if frame is None:
+                log_error("截屏失败, 退出循环组")
+                return True
+
+            # 检查停止条件
+            if self._check_loop_stop_condition(lg, frame,
+                    int((time.time() - loop_start_time) * 1000)):
+                log_info(f"      循环组 {lg.loop_name} 停止条件满足")
+                return False
+
+            # 执行 Block 序列
+            for block in lg.blocks:
+                if self._stop_requested:
+                    return False
+                result = self._execute_block(block)
+                if result:
+                    return True  # return/exit
+
+            # 循环次数控制
+            if lg.loop_count > 0 and iteration >= lg.loop_count:
+                log_info(f"      循环组 {lg.loop_name} 达到次数限制 ({lg.loop_count})")
+                return False
+
+    def _check_loop_stop_condition(self, lg: ARLoopGroup, frame, elapsed_ms: int) -> bool:
+        """
+        检查 LoopGroup 的停止条件
+
+        stop_condition_type:
+            0 = 无条件 (仅靠次数)
+            1 = 图片匹配
+            2 = 文字识别
+            3 = 超时
+        """
+        if lg.stop_condition_type == 0:
+            return False
+
+        if lg.stop_condition_type == 1:
+            if not lg.stop_image_path:
+                return False
+            template = self._image_pool.get(lg.stop_image_path)
+            if template is None:
+                import cv2
+                img = cv2.imread(lg.stop_image_path)
+                if img is None:
+                    log_warn(f"停止条件图片未加载: {lg.stop_image_path}")
+                    return False
+                self._image_pool[lg.stop_image_path] = img
+                template = img
+            import cv2
+            result = cv2.matchTemplate(frame, template, cv2.TM_CCOEFF_NORMED)
+            _, max_val, _, _ = cv2.minMaxLoc(result)
+            return max_val >= lg.stop_threshold
+
+        if lg.stop_condition_type == 2:
+            if not lg.stop_text:
+                return False
+            try:
+                import easyocr
+                if TaskEngine._ocr_reader is None:
+                    TaskEngine._ocr_reader = easyocr.Reader(
+                        ["ch_sim", "en"], gpu=False, verbose=False)
+                results = TaskEngine._ocr_reader.readtext(frame)
+                for (bbox, txt, conf) in results:
+                    if lg.stop_text in txt:
+                        return True
+                return False
+            except ImportError:
+                return False
+
+        if lg.stop_condition_type == 3:
+            if lg.stop_time_out <= 0:
+                return False
+            return elapsed_ms >= lg.stop_time_out
+
+        return False
 
     def _execute_block(self, block: ARBlock) -> bool:
         """
@@ -235,27 +355,32 @@ class TaskEngine:
 
         elif code.second_value == 1:
             # ── 点击: 匹配点坐标 + 偏移 ──
-            x = getattr(code, "_match_x", 0) + code.click_x
-            y = getattr(code, "_match_y", 0) + code.click_y
+            dx = random.randint(code.click_x, code.click_x_max) if code.click_x_max > code.click_x else code.click_x
+            dy = random.randint(code.click_y, code.click_y_max) if code.click_y_max > code.click_y else code.click_y
+            x = getattr(code, "_match_x", 0) + dx
+            y = getattr(code, "_match_y", 0) + dy
             log_debug(f"    点击 ({x}, {y})")
             self.controller.click(x, y)
 
         elif code.second_value == 2:
             # ── 滑动 ──
-            log_debug(f"    滑动 ({code.swipe_x_1},{code.swipe_y_1}) → "
-                      f"({code.swipe_x_2},{code.swipe_y_2})")
-            self.controller.swipe(
-                code.swipe_x_1, code.swipe_y_1,
-                code.swipe_x_2, code.swipe_y_2,
-                code.swipe_time
-            )
+            sx1 = random.randint(code.swipe_x_1, code.swipe_x_1_max) if code.swipe_x_1_max > code.swipe_x_1 else code.swipe_x_1
+            sy1 = random.randint(code.swipe_y_1, code.swipe_y_1_max) if code.swipe_y_1_max > code.swipe_y_1 else code.swipe_y_1
+            sx2 = random.randint(code.swipe_x_2, code.swipe_x_2_max) if code.swipe_x_2_max > code.swipe_x_2 else code.swipe_x_2
+            sy2 = random.randint(code.swipe_y_2, code.swipe_y_2_max) if code.swipe_y_2_max > code.swipe_y_2 else code.swipe_y_2
+            st = random.randint(code.swipe_time, code.swipe_time_max) if code.swipe_time_max > code.swipe_time else code.swipe_time
+            log_debug(f"    滑动 ({sx1},{sy1}) → ({sx2},{sy2})")
+            self.controller.swipe(sx1, sy1, sx2, sy2, st)
 
         elif code.second_value == 3:
             # ---- 长按 ----
-            x = getattr(code, "_match_x", 0) + code.click_x
-            y = getattr(code, "_match_y", 0) + code.click_y
-            log_debug(f"    长按 ({x},{y}) {code.sleep_time}ms")
-            self.controller.long_click(x, y, code.sleep_time)
+            dx = random.randint(code.click_x, code.click_x_max) if code.click_x_max > code.click_x else code.click_x
+            dy = random.randint(code.click_y, code.click_y_max) if code.click_y_max > code.click_y else code.click_y
+            x = getattr(code, "_match_x", 0) + dx
+            y = getattr(code, "_match_y", 0) + dy
+            st = random.randint(code.sleep_time, code.sleep_time_max) if code.sleep_time_max > code.sleep_time else code.sleep_time
+            log_debug(f"    长按 ({x},{y}) {st}ms")
+            self.controller.long_click(x, y, st)
 
 
         elif code.second_value == 4:
@@ -265,8 +390,9 @@ class TaskEngine:
 
         elif code.second_value == 5:
             # ── 等待 ──
-            log_debug(f"    等待 {code.sleep_time}ms")
-            time.sleep(code.sleep_time / 1000.0)
+            wait_ms = random.randint(code.sleep_time, code.sleep_time_max) if code.sleep_time_max > code.sleep_time else code.sleep_time
+            log_debug(f"    等待 {wait_ms}ms")
+            time.sleep(wait_ms / 1000.0)
 
         elif code.second_value == 6:
             # ── 退出当前 Block 循环 ──

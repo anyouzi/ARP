@@ -1,0 +1,44 @@
+{
+  "project_id": 1,
+  "project_name": "blueAchice",
+  "controller_type": 1,
+  "device_path": "",
+  "device_index": 0,
+  "adb_path": "127.0.0.1",
+  "adb_port": 5555,
+  "desktop_region": "",
+  "duration_time": 200,
+  "run_max_times": 200,
+  "tasks": [
+    {
+      "task_id": 1,
+      "task_name": "login",
+      "blocks": [
+        {
+          "block_id": 1,
+          "block_name": "indx",
+          "codes": [
+            {
+              "code_id": 1,
+              "first_value": 1,
+              "second_value": 1,
+              "image_path": "data/blueAchice/Snipaste_2026-05-28_14-21-27.png",
+              "threshold": 0.9,
+              "click_x": 0,
+              "click_y": 0,
+              "sleep_time": 0,
+              "key_code": 0,
+              "swipe_x_1": 0,
+              "swipe_y_1": 0,
+              "swipe_x_2": 0,
+              "swipe_y_2": 0,
+              "swipe_time": 300,
+              "text": "",
+              "time_out": 0
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

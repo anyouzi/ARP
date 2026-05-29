@@ -19,6 +19,7 @@ _exports = {
     "ARProject":            "config",
     "ARTask":               "config",
     "ARBlock":              "config",
+    "ARLoopGroup":          "config",
     "ARCode":               "config",
     "TaskEngine":           "engine",
     "log_info":             "logger",

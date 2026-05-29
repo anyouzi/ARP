@@ -1,7 +1,7 @@
 """OpenAR 工作流编辑器 — 可视化编辑 · 截图模板 · 导入导出"""
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, simpledialog
-import json, os, sys, shutil, zipfile, time
+import json, os, sys, shutil, zipfile, time, threading
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -30,7 +30,7 @@ class WorkflowEditor:
             "controller_type": 1, "device_path": "",
             "device_index": 0, "adb_path": "127.0.0.1",
             "adb_port": 5555, "desktop_region": "",
-            "duration_time": 200, "run_max_times": 200,
+            "duration_time": 200, "run_max_times": 200, "stop_hotkey": "Ctrl+Q",
             "tasks": []
         }
 
@@ -76,7 +76,7 @@ class WorkflowEditor:
         self.status.pack(side=tk.BOTTOM, fill=tk.X)
 
     def _build_file_list(self, parent):
-        ttk.Label(parent, text="项目文件 (res/)", font=("", 10, "bold")).pack(pady=(5,0))
+        ttk.Label(parent, text="项目文件", font=("", 10, "bold")).pack(pady=(5,0))
 
         dir_frame = ttk.Frame(parent)
         dir_frame.pack(fill=tk.X, padx=5, pady=2)
@@ -125,6 +125,8 @@ class WorkflowEditor:
         ttk.Separator(parent, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=5)
         ttk.Button(parent, text="+ 添加任务", command=self._add_task).pack(pady=2, fill=tk.X, padx=5)
         ttk.Button(parent, text="运行 (F5)", command=self._run).pack(pady=2, fill=tk.X, padx=5)
+        self._stop_btn = ttk.Button(parent, text="■ 停止运行", command=self._stop_engine, state=tk.DISABLED)
+        self._stop_btn.pack(pady=2, fill=tk.X, padx=5)
 
     def _build_workflow(self, parent):
         hint = ttk.Label(parent, text="ℹ Block=循环体(内部指令按序匹配,命中执行) | Block间顺序执行",
@@ -133,7 +135,7 @@ class WorkflowEditor:
 
         bar = ttk.Frame(parent)
         bar.pack(fill=tk.X, pady=(5,0))
-        for text, cmd in [("+ Block", self._add_block), ("+ 指令", self._add_code),
+        for text, cmd in [("+ 循环", self._add_loop_group), ("+ Block", self._add_block), ("+ 指令", self._add_code),
                            ("模板", self._show_templates),
                            ("存模板", self._save_as_template),
                            ("编辑", self._edit_node), ("删除", self._delete_node),
@@ -222,6 +224,15 @@ class WorkflowEditor:
         try:
             with open(path, "r", encoding="utf-8") as f:
                 self.data = json.load(f)
+            # 向后兼容: 旧格式 blocks → loop_groups
+            for task in self.data.get("tasks", []):
+                if task.get("blocks") and not task.get("loop_groups"):
+                    task["loop_groups"] = [{
+                        "loop_id": 1, "loop_name": "Loop 1", "loop_count": 1,
+                        "stop_condition_type": 0, "stop_image_path": "",
+                        "stop_threshold": 0.9, "stop_text": "", "stop_time_out": 0,
+                        "blocks": task.pop("blocks")
+                    }]
             self._ui_from_data()
             self._refresh_tree()
         except Exception as e:
@@ -356,15 +367,21 @@ class WorkflowEditor:
         self.tree.delete(*self.tree.get_children())
         for t_idx, task in enumerate(self.data.get("tasks", [])):
             t_id = self.tree.insert("", tk.END, text=f"📋 {task['task_name']}", values=("",))
-            for b_idx, block in enumerate(task.get("blocks", [])):
-                b_id = self.tree.insert(t_id, tk.END, text=f"🔄 {block['block_name']}", values=("",))
-                for c_idx, code in enumerate(block.get("codes", [])):
-                    info = self._summary(code)
-                    self.tree.insert(b_id, tk.END, text=f"▸ 指令{c_idx+1}", values=(info,))
+            for lg_idx, lg in enumerate(task.get("loop_groups", [])):
+                cnt = lg.get("loop_count", 1)
+                st = "" if lg.get("stop_condition_type", 0) == 0 else "条件停"
+                label = f"🔁 {lg['loop_name']} (x{cnt} {st})" if st else f"🔁 {lg['loop_name']} (x{cnt})"
+                lg_id = self.tree.insert(t_id, tk.END, text=label, values=("",))
+                for b_idx, block in enumerate(lg.get("blocks", [])):
+                    b_id = self.tree.insert(lg_id, tk.END, text=f"🔄 {block['block_name']}", values=("",))
+                    for c_idx, code in enumerate(block.get("codes", [])):
+                        info = self._summary(code)
+                        self.tree.insert(b_id, tk.END, text=f"▸ 指令{c_idx+1}", values=(info,))
         self._expand_all()
-        tc = sum(len(b.get('codes',[])) for t in self.data.get('tasks',[]) for b in t.get('blocks',[]))
-        self.status.config(text=f"任务:{len(self.data.get('tasks',[]))} | Block:{sum(len(t.get('blocks',[])) for t in self.data.get('tasks',[]))} | 指令:{tc}")
-
+        tc = sum(len(b.get('codes',[])) for t in self.data.get('tasks',[]) for lg in t.get('loop_groups',[]) for b in lg.get('blocks',[]))
+        nc = sum(1 for t in self.data.get('tasks',[]) for lg in t.get('loop_groups',[]))
+        nb = sum(len(lg.get('blocks',[])) for t in self.data.get('tasks',[]) for lg in t.get('loop_groups',[]))
+        self.status.config(text=f"任务:{len(self.data.get('tasks',[]))} | 循环:{nc} | Block:{nb} | 指令:{tc}")
     def _expand_all(self):
         def go(item):
             self.tree.item(item, open=True)
@@ -384,16 +401,18 @@ class WorkflowEditor:
 
     def _sel(self):
         s = self.tree.selection()
-        if not s: return None, None, None
+        if not s: return None, None, None, None
         i = s[0]
         p = self.tree.parent(i)
         gp = self.tree.parent(p) if p else ""
-        return i, p, gp
+        ggp = self.tree.parent(gp) if gp else ""
+        return i, p, gp, ggp
 
-    def _tk_idx(self, item, txt, parent, grandparent):
+    def _tk_idx(self, item, txt, parent, grandparent, great_grandparent=None):
         if txt.startswith("📋"): return self.tree.index(item)
-        if txt.startswith("🔄"): return self.tree.index(parent)
-        if txt.startswith("▸"): return self.tree.index(grandparent)
+        if txt.startswith("🔁"): return self.tree.index(parent)
+        if txt.startswith("🔄"): return self.tree.index(grandparent)
+        if txt.startswith("▸"): return self.tree.index(great_grandparent)
         return None
 
     # ============================================================
@@ -404,8 +423,78 @@ class WorkflowEditor:
         if name:
             self._sync_from_ui()
             self.data.setdefault("tasks", []).append(
-                {"task_id": len(self.data["tasks"])+1, "task_name": name, "blocks": []})
+                {"task_id": len(self.data["tasks"])+1, "task_name": name,
+                 "loop_groups": [{"loop_id": 1, "loop_name": "Loop 1", "loop_count": 1,
+                                   "stop_condition_type": 0, "stop_image_path": "",
+                                   "stop_threshold": 0.9, "stop_text": "",
+                                   "stop_time_out": 0, "blocks": []}]})
             self._refresh_tree()
+
+    def _add_loop_group(self):
+        item, parent, grandparent, _ = self._sel()
+        if not item: return
+        txt = self.tree.item(item, "text")
+        self._sync_from_ui()
+        t_idx = self._tk_idx(item, txt, parent, grandparent)
+        if t_idx is None: return
+        lg = self._loop_group_dialog(None)
+        if lg:
+            self.data["tasks"][t_idx].setdefault("loop_groups", []).append(lg)
+            self._refresh_tree()
+            self._auto_save()
+
+    def _loop_group_dialog(self, existing):
+        dlg = tk.Toplevel(self.root)
+        dlg.title("编辑循环组" if existing else "新建循环组")
+        dlg.geometry("480x380")
+        dlg.resizable(False, False)
+        default = {"loop_id": 1, "loop_name": "Loop 1", "loop_count": 1,
+                    "stop_condition_type": 0, "stop_image_path": "",
+                    "stop_threshold": 0.9, "stop_text": "", "stop_time_out": 0}
+        vals = {**default, **existing} if existing else default
+        vars_ = {k: tk.StringVar(value=str(v)) for k, v in vals.items()}
+        result = [None]
+        f = ttk.Frame(dlg, padding=10)
+        f.pack(fill=tk.BOTH, expand=True)
+        def mk(lbl, key, r, w=10):
+            ttk.Label(f, text=lbl).grid(row=r, column=0, sticky=tk.W, pady=3)
+            ttk.Entry(f, textvariable=vars_[key], width=w).grid(row=r, column=1, sticky=tk.W, padx=(5,0))
+        mk("循环名称:", "loop_name", 0, 15)
+        mk("循环次数 (0=无限):", "loop_count", 1, 6)
+        ttk.Separator(f, orient=tk.HORIZONTAL).grid(row=2, column=0, columnspan=2, sticky=tk.EW, pady=10)
+        ttk.Label(f, text="停止条件:", font=("", 10, "bold")).grid(row=3, column=0, sticky=tk.W)
+        cb = ttk.Combobox(f, textvariable=vars_["stop_condition_type"],
+                          values=["0-仅靠次数","1-匹配图片","2-文字识别","3-超时"],
+                          width=14, state="readonly")
+        cb.grid(row=3, column=1, sticky=tk.W, padx=(5,0))
+        st = vals["stop_condition_type"]
+        st_labels = {0:"仅靠次数",1:"匹配图片",2:"文字识别",3:"超时"}
+        cb.set(f"{st}-{st_labels[st]}")
+        mk("图片路径:", "stop_image_path", 4, 18)
+        mk("匹配阈值:", "stop_threshold", 5, 6)
+        mk("识别文字:", "stop_text", 6, 18)
+        mk("超时(ms):", "stop_time_out", 7, 8)
+        def save():
+            try:
+                result[0] = {
+                    "loop_id": existing.get("loop_id", 1) if existing else 1,
+                    "loop_name": vars_["loop_name"].get(),
+                    "loop_count": int(vars_["loop_count"].get()),
+                    "stop_condition_type": int(vars_["stop_condition_type"].get().split("-")[0]),
+                    "stop_image_path": vars_["stop_image_path"].get().strip(),
+                    "stop_threshold": float(vars_["stop_threshold"].get()),
+                    "stop_text": vars_["stop_text"].get().strip(),
+                    "stop_time_out": int(vars_["stop_time_out"].get()),
+                    "blocks": existing.get("blocks", []) if existing else [],
+                }
+                dlg.destroy()
+            except ValueError as e:
+                messagebox.showerror("输入错误", str(e), parent=dlg)
+        ttk.Button(f, text="确定", command=save).grid(row=8, column=0, columnspan=2, pady=15)
+        dlg.transient(self.root)
+        dlg.grab_set()
+        self.root.wait_window(dlg)
+        return result[0]
 
     def _init_default_templates(self):
         """首次运行时创建默认模板"""
@@ -434,14 +523,15 @@ class WorkflowEditor:
 
     def _save_as_template(self):
         """保存选中 Block 为模板"""
-        item, parent, grandparent = self._sel()
+        item, parent, grandparent, ggp = self._sel()
         if not item: return
         txt = self.tree.item(item, "text")
         if not txt.startswith("🔄"): return
         self._sync_from_ui()
-        t_idx = self.tree.index(parent)
+        t_idx = self.tree.index(grandparent)
+        lg_idx = self.tree.index(parent)
         b_idx = self.tree.index(item)
-        block = self.data["tasks"][t_idx]["blocks"][b_idx]
+        block = self.data["tasks"][t_idx]["loop_groups"][lg_idx]["blocks"][b_idx]
         name = simpledialog.askstring("存为模板", "模板名称:", parent=self.root)
         if not name: return
         path = os.path.join(self._template_dir(), f"{name}.json")
@@ -487,13 +577,16 @@ class WorkflowEditor:
         except:
             return
         # 找到当前选中位置插入
-        item, parent, grandparent = self._sel()
+        item, parent, grandparent, ggp = self._sel()
         if not item: return
         txt = self.tree.item(item, "text")
-        t_idx = self._tk_idx(item, txt, parent, grandparent)
+        t_idx = self._tk_idx(item, txt, parent, grandparent, ggp)
         if t_idx is None: return
         self._sync_from_ui()
-        blocks = self.data["tasks"][t_idx].setdefault("blocks", [])
+        lgs = self.data["tasks"][t_idx].setdefault("loop_groups", [])
+        if not lgs:
+            lgs.append({"loop_id":1,"loop_name":"Loop 1","loop_count":1,"stop_condition_type":0,"stop_image_path":"","stop_threshold":0.9,"stop_text":"","stop_time_out":0,"blocks":[]})
+        blocks = lgs[-1].setdefault("blocks", [])
         block_name = tmpl.get("name", name)
         blocks.append({"block_id": len(blocks)+1, "block_name": block_name, "codes": tmpl.get("codes", [])})
         self._refresh_tree()
@@ -522,36 +615,75 @@ class WorkflowEditor:
             lb.delete(sel[0])
 
     def _add_block(self):
-        item, parent, grandparent = self._sel()
+        item, parent, grandparent, ggp = self._sel()
         if not item: return
         txt = self.tree.item(item, "text")
-        t_idx = self._tk_idx(item, txt, parent, grandparent)
+        self._sync_from_ui()
+        t_idx = self._tk_idx(item, txt, parent, grandparent, ggp)
         if t_idx is None: return
+        tasks = self.data.setdefault("tasks", [])
+        if t_idx >= len(tasks): return
+        lgs = tasks[t_idx].setdefault("loop_groups", [])
+        if not lgs:
+            lgs.append({"loop_id":1,"loop_name":"Loop 1","loop_count":1,"stop_condition_type":0,"stop_image_path":"","stop_threshold":0.9,"stop_text":"","stop_time_out":0,"blocks":[]})
+        if txt.startswith("📋"):
+            lg_idx = len(lgs) - 1
+        elif txt.startswith("🔁"):
+            lg_idx = self.tree.index(item)
+        elif txt.startswith("🔄"):
+            lg_idx = self.tree.index(parent)
+        elif txt.startswith("▸"):
+            lg_idx = self.tree.index(grandparent) if grandparent else (len(lgs) - 1)
+        else:
+            return
+        if lg_idx < 0 or lg_idx >= len(lgs): return
+        target = lgs[lg_idx]
         name = simpledialog.askstring("新建 Block", "名称:", parent=self.root)
         if name:
-            self._sync_from_ui()
-            blocks = self.data["tasks"][t_idx].setdefault("blocks", [])
-            blocks.append({"block_id": len(blocks)+1, "block_name": name, "codes": []})
+            target.setdefault("blocks", []).append({"block_id": len(target.get("blocks",[]))+1, "block_name": name, "codes": []})
             self._refresh_tree()
             self._auto_save()
 
     def _add_code(self):
-        item, parent, grandparent = self._sel()
+        item, parent, grandparent, ggp = self._sel()
         if not item: return
         txt = self.tree.item(item, "text")
         self._sync_from_ui()
-        t_idx = self._tk_idx(item, txt, parent, grandparent)
+        t_idx = self._tk_idx(item, txt, parent, grandparent, ggp)
         if t_idx is None: return
-        blocks = self.data["tasks"][t_idx].setdefault("blocks", [])
+        tasks = self.data.setdefault("tasks", [])
+        if t_idx >= len(tasks): return
+        lgs = tasks[t_idx].setdefault("loop_groups", [])
+        if not lgs:
+            lgs.append({"loop_id":1,"loop_name":"Loop 1","loop_count":1,"stop_condition_type":0,"stop_image_path":"","stop_threshold":0.9,"stop_text":"","stop_time_out":0,"blocks":[]})
+        # 找到目标 LoopGroup
         if txt.startswith("📋"):
+            lg_idx = len(lgs) - 1
+        elif txt.startswith("🔁"):
+            lg_idx = self.tree.index(item)
+        elif txt.startswith("🔄"):
+            lg_idx = self.tree.index(parent)
+        elif txt.startswith("▸"):
+            lg_idx = self.tree.index(grandparent) if grandparent else (len(lgs) - 1)
+        else:
+            return
+        if lg_idx < 0 or lg_idx >= len(lgs): return
+        blocks = lgs[lg_idx].setdefault("blocks", [])
+        # 找到目标 Block (or create default)
+        if txt.startswith("📋") or txt.startswith("🔁"):
             if not blocks:
                 blocks.append({"block_id": 1, "block_name": "Block 1", "codes": []})
             target = blocks[-1]
         elif txt.startswith("🔄"):
-            target = blocks[self.tree.index(item)]
+            b_idx = self.tree.index(item)
+            if b_idx < 0 or b_idx >= len(blocks): return
+            target = blocks[b_idx]
         elif txt.startswith("▸"):
-            target = blocks[self.tree.index(parent)]
-        else: return
+            b_idx = self.tree.index(parent)
+            if b_idx < 0 or b_idx >= len(blocks): return
+            target = blocks[b_idx]
+        else:
+            return
         code = self._code_dialog(None)
         if code:
             target.setdefault("codes", []).append(code)
@@ -559,59 +691,82 @@ class WorkflowEditor:
             self._auto_save()
 
     def _edit_node(self):
-        item, parent, grandparent = self._sel()
-        if not item: return
-        txt = self.tree.item(item, "text")
-        self._sync_from_ui()
-
-        if txt.startswith("📋"):
-            t_idx = self.tree.index(item)
-            task = self.data["tasks"][t_idx]
-            n = simpledialog.askstring("编辑任务", "名称:", initialvalue=task["task_name"], parent=self.root)
-            if n: task["task_name"] = n; self._refresh_tree()
-            self._auto_save()
-
-        elif txt.startswith("🔄"):
-            t_idx = self.tree.index(parent)
-            b_idx = self.tree.index(item)
-            block = self.data["tasks"][t_idx]["blocks"][b_idx]
-            n = simpledialog.askstring("编辑 Block", "名称:", initialvalue=block["block_name"], parent=self.root)
-            if n: block["block_name"] = n; self._refresh_tree()
-            self._auto_save()
-
-        elif txt.startswith("▸"):
-            t_idx = self._tk_idx(item, txt, parent, grandparent)
-            b_idx = self.tree.index(parent)
-            c_idx = self.tree.index(item)
-            code = self.data["tasks"][t_idx]["blocks"][b_idx]["codes"][c_idx]
-            nc = self._code_dialog(code)
-            if nc:
-                self.data["tasks"][t_idx]["blocks"][b_idx]["codes"][c_idx] = nc
-                self._refresh_tree()
+        try:
+            item, parent, grandparent, ggp = self._sel()
+            if not item: return
+            txt = self.tree.item(item, "text")
+            self._sync_from_ui()
+            if txt.startswith("📋"):
+                t_idx = self.tree.index(item)
+                task = self.data["tasks"][t_idx]
+                n = simpledialog.askstring("编辑任务", "名称:", initialvalue=task["task_name"], parent=self.root)
+                if n: task["task_name"] = n; self._refresh_tree()
                 self._auto_save()
+            elif txt.startswith("🔁"):
+                t_idx = self.tree.index(parent)
+                lg_idx = self.tree.index(item)
+                lg = self.data["tasks"][t_idx]["loop_groups"][lg_idx]
+                nlg = self._loop_group_dialog(lg)
+                if nlg:
+                    nlg["blocks"] = lg.get("blocks", [])
+                    self.data["tasks"][t_idx]["loop_groups"][lg_idx] = nlg
+                    self._refresh_tree()
+                    self._auto_save()
+            elif txt.startswith("🔄"):
+                t_idx = self.tree.index(grandparent)
+                lg_idx = self.tree.index(parent)
+                b_idx = self.tree.index(item)
+                block = self.data["tasks"][t_idx]["loop_groups"][lg_idx]["blocks"][b_idx]
+                n = simpledialog.askstring("编辑 Block", "名称:", initialvalue=block["block_name"], parent=self.root)
+                if n: block["block_name"] = n; self._refresh_tree()
+                self._auto_save()
+            elif txt.startswith("▸"):
+                t_idx = self._tk_idx(item, txt, parent, grandparent, ggp)
+                lg_idx = self.tree.index(grandparent)
+                b_idx = self.tree.index(parent)
+                c_idx = self.tree.index(item)
+                code = self.data["tasks"][t_idx]["loop_groups"][lg_idx]["blocks"][b_idx]["codes"][c_idx]
+                nc = self._code_dialog(code)
+                if nc:
+                    self.data["tasks"][t_idx]["loop_groups"][lg_idx]["blocks"][b_idx]["codes"][c_idx] = nc
+                    self._refresh_tree()
+                    self._auto_save()
+        except (IndexError, KeyError):
+            pass
 
     def _delete_node(self):
-        item, parent, grandparent = self._sel()
-        if not item: return
-        txt = self.tree.item(item, "text")
-        self._sync_from_ui()
-        if txt.startswith("📋"): del self.data["tasks"][self.tree.index(item)]
-        elif txt.startswith("🔄"):
-            del self.data["tasks"][self.tree.index(parent)]["blocks"][self.tree.index(item)]
-        elif txt.startswith("▸"):
-            del self.data["tasks"][self.tree.index(grandparent)]["blocks"][self.tree.index(parent)]["codes"][self.tree.index(item)]
-        self._refresh_tree()
-        self._auto_save()
+        try:
+            item, parent, grandparent, ggp = self._sel()
+            if not item: return
+            txt = self.tree.item(item, "text")
+            self._sync_from_ui()
+            if txt.startswith("📋"):
+                del self.data["tasks"][self.tree.index(item)]
+            elif txt.startswith("🔁"):
+                del self.data["tasks"][self.tree.index(parent)]["loop_groups"][self.tree.index(item)]
+            elif txt.startswith("🔄"):
+                del self.data["tasks"][self.tree.index(grandparent)]["loop_groups"][self.tree.index(parent)]["blocks"][self.tree.index(item)]
+            elif txt.startswith("▸"):
+                del self.data["tasks"][self.tree.index(ggp)]["loop_groups"][self.tree.index(grandparent)]["blocks"][self.tree.index(parent)]["codes"][self.tree.index(item)]
+            self._refresh_tree()
+            self._auto_save()
+        except (IndexError, KeyError):
+            pass
 
     def _move(self, d):
-        item, parent, grandparent = self._sel()
+        item, parent, grandparent, ggp = self._sel()
         if not item: return
         txt = self.tree.item(item, "text")
         self._sync_from_ui()
         try:
-            if txt.startswith("📋"): lst, idx = self.data["tasks"], self.tree.index(item)
-            elif txt.startswith("🔄"): lst = self.data["tasks"][self.tree.index(parent)]["blocks"]; idx = self.tree.index(item)
-            elif txt.startswith("▸"): lst = self.data["tasks"][self.tree.index(grandparent)]["blocks"][self.tree.index(parent)]["codes"]; idx = self.tree.index(item)
+            if txt.startswith("📋"):
+                lst, idx = self.data["tasks"], self.tree.index(item)
+            elif txt.startswith("🔁"):
+                lst = self.data["tasks"][self.tree.index(parent)]["loop_groups"]; idx = self.tree.index(item)
+            elif txt.startswith("🔄"):
+                lst = self.data["tasks"][self.tree.index(grandparent)]["loop_groups"][self.tree.index(parent)]["blocks"]; idx = self.tree.index(item)
+            elif txt.startswith("▸"):
+                lst = self.data["tasks"][self.tree.index(ggp)]["loop_groups"][self.tree.index(grandparent)]["blocks"][self.tree.index(parent)]["codes"]; idx = self.tree.index(item)
             else: return
             ni = idx + d
             if 0 <= ni < len(lst): lst[idx], lst[ni] = lst[ni], lst[idx]
@@ -625,15 +780,15 @@ class WorkflowEditor:
     def _code_dialog(self, existing):
         dlg = tk.Toplevel(self.root)
         dlg.title("编辑指令" if existing else "新建指令")
-        dlg.geometry("700x500")
+        dlg.geometry("700x580")
         dlg.resizable(False, False)
 
         # 默认值补全所有字段
         default_vals = {"first_value": 1, "second_value": 1, "image_path": "",
-                        "threshold": 0.9, "click_x": 0, "click_y": 0,
-                        "sleep_time": 0, "key_code": 0,
-                        "swipe_x_1": 0, "swipe_y_1": 0, "swipe_x_2": 0, "swipe_y_2": 0,
-                        "swipe_time": 300, "text": "", "time_out": 0}
+                        "threshold": 0.9, "click_x": 0, "click_y": 0, "click_x_max": 0, "click_y_max": 0,
+                        "sleep_time": 0, "sleep_time_max": 0, "key_code": 0,
+                        "swipe_x_1": 0, "swipe_y_1": 0, "swipe_x_2": 0, "swipe_y_2": 0, "swipe_x_1_max": 0, "swipe_y_1_max": 0, "swipe_x_2_max": 0, "swipe_y_2_max": 0,
+                        "swipe_time": 300, "swipe_time_max": 0, "text": "", "time_out": 0}
         vals = {**default_vals, **existing} if existing else default_vals
         vars_ = {k: tk.StringVar(value=str(v)) for k, v in vals.items()}
         result = [None]
@@ -756,20 +911,31 @@ class WorkflowEditor:
             if av == 1:
                 _mk_field(act_frame, "偏移 X:", "click_x", 0)
                 _mk_field(act_frame, "偏移 Y:", "click_y", 1)
+                _mk_field(act_frame, "随机上限 X:", "click_x_max", 2)
+                _mk_field(act_frame, "随机上限 Y:", "click_y_max", 3)
             elif av == 2:
                 _mk_field(act_frame, "起点 X:", "swipe_x_1", 0)
                 _mk_field(act_frame, "起点 Y:", "swipe_y_1", 1)
                 _mk_field(act_frame, "终点 X:", "swipe_x_2", 2)
                 _mk_field(act_frame, "终点 Y:", "swipe_y_2", 3)
-                _mk_field(act_frame, "滑动时长(ms):", "swipe_time", 4)
+                _mk_field(act_frame, "起点X上限:", "swipe_x_1_max", 4)
+                _mk_field(act_frame, "起点Y上限:", "swipe_y_1_max", 5)
+                _mk_field(act_frame, "终点X上限:", "swipe_x_2_max", 6)
+                _mk_field(act_frame, "终点Y上限:", "swipe_y_2_max", 7)
+                _mk_field(act_frame, "滑动时长(ms):", "swipe_time", 8)
+                _mk_field(act_frame, "时长上限(ms):", "swipe_time_max", 9)
             elif av == 3:
                 _mk_field(act_frame, "偏移 X:", "click_x", 0)
                 _mk_field(act_frame, "偏移 Y:", "click_y", 1)
-                _mk_field(act_frame, "长按(ms):", "sleep_time", 2)
+                _mk_field(act_frame, "随机上限 X:", "click_x_max", 2)
+                _mk_field(act_frame, "随机上限 Y:", "click_y_max", 3)
+                _mk_field(act_frame, "长按(ms):", "sleep_time", 4)
+                _mk_field(act_frame, "时长上限(ms):", "sleep_time_max", 5)
             elif av == 4:
                 _mk_field(act_frame, "按键代码:", "key_code", 0)
             elif av == 5:
                 _mk_field(act_frame, "等待(ms):", "sleep_time", 0)
+                _mk_field(act_frame, "随机上限(ms):", "sleep_time_max", 1)
             else:
                 ttk.Label(act_frame, text="无需额外参数", foreground="gray").grid(row=0, column=0, sticky=tk.W, pady=3)
 
@@ -789,13 +955,21 @@ class WorkflowEditor:
                     "threshold": float(vars_["threshold"].get()),
                     "click_x": int(vars_["click_x"].get()),
                     "click_y": int(vars_["click_y"].get()),
+                    "click_x_max": int(vars_["click_x_max"].get()),
+                    "click_y_max": int(vars_["click_y_max"].get()),
                     "sleep_time": int(vars_["sleep_time"].get()),
+                    "sleep_time_max": int(vars_["sleep_time_max"].get()),
                     "key_code": int(vars_["key_code"].get()),
                     "swipe_x_1": int(vars_["swipe_x_1"].get()),
                     "swipe_y_1": int(vars_["swipe_y_1"].get()),
                     "swipe_x_2": int(vars_["swipe_x_2"].get()),
                     "swipe_y_2": int(vars_["swipe_y_2"].get()),
+                    "swipe_x_1_max": int(vars_["swipe_x_1_max"].get()),
+                    "swipe_y_1_max": int(vars_["swipe_y_1_max"].get()),
+                    "swipe_x_2_max": int(vars_["swipe_x_2_max"].get()),
+                    "swipe_y_2_max": int(vars_["swipe_y_2_max"].get()),
                     "swipe_time": int(vars_["swipe_time"].get()),
+                    "swipe_time_max": int(vars_["swipe_time_max"].get()),
                     "text": vars_["text"].get().strip(),
                     "time_out": int(vars_["time_out"].get()),
                 }
@@ -870,33 +1044,41 @@ class WorkflowEditor:
     # ============================================================
     #  运行
     # ============================================================
+    def _stop_engine(self):
+        if hasattr(self, "_engine"):
+            self._engine.stop()
+
     def _run(self, evt=None):
         self._sync_from_ui()
         tmp = os.path.join(self._project_root.get(), "res", "_tmp_workflow.json")
         self._write_json(tmp)
-        try:
-            from openar import ARProject, AdbController, DesktopController, TaskEngine
-            project = ARProject.from_json_file(tmp)
-            if project.controller_type == 1:
-                region = None
-                if project.desktop_region:
-                    parts = [int(x.strip()) for x in project.desktop_region.split(",")]
-                    if len(parts) == 4: region = tuple(parts)
-                ctrl = DesktopController(window_title=project.device_path or None,
-                                         monitor=project.device_index, region=region)
-            else:
-                ctrl = AdbController(adb_path=project.adb_path, adb_port=project.adb_port)
-            if not ctrl.connect():
-                messagebox.showerror("连接失败", "无法连接设备/桌面")
-                return
-            engine = TaskEngine(project, ctrl)
-            engine.run()
-            ctrl.disconnect()
-            messagebox.showinfo("完成", "工作流执行完毕")
-        except Exception as e:
-            messagebox.showerror("运行失败", str(e))
-        finally:
-            if os.path.exists(tmp): os.remove(tmp)
+        self._stop_btn.config(state=tk.NORMAL, text="■ 停止运行 (点击停止)")
+        def _runner():
+            try:
+                from openar import ARProject, AdbController, DesktopController, TaskEngine
+                project = ARProject.from_json_file(tmp)
+                if project.controller_type == 1:
+                    region = None
+                    if project.desktop_region:
+                        parts = [int(x.strip()) for x in project.desktop_region.split(",")]
+                        if len(parts) == 4: region = tuple(parts)
+                    ctrl = DesktopController(window_title=project.device_path or None,
+                                             monitor=project.device_index, region=region)
+                else:
+                    ctrl = AdbController(adb_path=project.adb_path, adb_port=project.adb_port)
+                if not ctrl.connect():
+                    self.root.after(0, lambda: messagebox.showerror("连接失败", "无法连接设备/桌面"))
+                    return
+                self._engine = TaskEngine(project, ctrl)
+                self._engine.run()
+                ctrl.disconnect()
+                self.root.after(0, lambda: messagebox.showinfo("完成", "工作流执行完毕"))
+            except Exception as e:
+                self.root.after(0, lambda: messagebox.showerror("运行失败", str(e)))
+            finally:
+                self.root.after(0, lambda: self._stop_btn.config(state=tk.DISABLED, text="■ 停止运行"))
+                if os.path.exists(tmp): os.remove(tmp)
+        threading.Thread(target=_runner, daemon=True).start()
 
 
 if __name__ == "__main__":

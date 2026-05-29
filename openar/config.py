@@ -4,8 +4,9 @@
 层级结构:
     ARProject (项目)
       └─ ARTask[] (任务列表)
-           └─ ARBlock[] (代码块 — 每个 Block 是一个循环体)
-                └─ ARCode[] (单条指令)
+           └─ ARLoopGroup[] (循环组)
+                └─ ARBlock[] (代码块)
+                     └─ ARCode[] (单条指令)
 """
 
 import json
@@ -61,6 +62,14 @@ class ARCode:
     long_click_x: int = 0
     long_click_y: int = 0
     long_click_time: int = 0      # 长按持续时间 (毫秒)
+    click_x_max: int = 0
+    click_y_max: int = 0
+    swipe_x_1_max: int = 0
+    swipe_y_1_max: int = 0
+    swipe_x_2_max: int = 0
+    swipe_y_2_max: int = 0
+    swipe_time_max: int = 0
+    sleep_time_max: int = 0
 
     # ---- 按键相关 ----
     key_code: int = 0             # Android keyevent 码
@@ -102,21 +111,77 @@ class ARBlock:
 
 
 @dataclass
-class ARTask:
+class ARLoopGroup:
     """
-    任务 — 包含多个 Block，按顺序执行
+    循环组 — Task 内的外层循环
+
+    一个 LoopGroup 包含多个 Block，按顺序执行。
+    执行完一轮所有 Block 后，loop_count 减 1，重复直到：
+      - loop_count 耗尽 (0 表示无限循环)
+      - 停止条件满足 (图片匹配/文字识别/超时)
+      - 全局停止标志被设置
+
+    stop_condition_type:
+        0 = 仅靠循环次数 (无条件)
+        1 = 图像匹配满足时停止
+        2 = 文字识别命中时停止
+        3 = 超时时停止
     """
-    task_id: int = 0
-    task_name: str = "New Task"
+    loop_id: int = 0
+    loop_name: str = "Loop 1"
+    loop_count: int = 1          # 循环次数 (0=无限循环直到条件满足)
+
+    # 停止条件
+    stop_condition_type: int = 0 # 0=次数, 1=图片, 2=文字, 3=超时
+    stop_image_path: str = ""    # 停止条件图片路径
+    stop_threshold: float = 0.9  # 图片匹配阈值
+    stop_text: str = ""          # 停止条件文字
+    stop_time_out: int = 0       # 超时时间 (毫秒)
+
     blocks: List[ARBlock] = field(default_factory=list)
 
     @classmethod
-    def from_dict(cls, d: dict) -> "ARTask":
+    def from_dict(cls, d: dict) -> "ARLoopGroup":
         blocks = [ARBlock.from_dict(b) for b in d.get("blocks", [])]
+        return cls(
+            loop_id=d.get("loop_id", 0),
+            loop_name=d.get("loop_name", "Loop 1"),
+            loop_count=d.get("loop_count", 1),
+            stop_condition_type=d.get("stop_condition_type", 0),
+            stop_image_path=d.get("stop_image_path", ""),
+            stop_threshold=d.get("stop_threshold", 0.9),
+            stop_text=d.get("stop_text", ""),
+            stop_time_out=d.get("stop_time_out", 0),
+            blocks=blocks,
+        )
+
+
+@dataclass
+class ARTask:
+    """
+    任务 — 包含多个 LoopGroup，按顺序执行
+
+    兼容旧格式: 如果 JSON 有 "blocks" 但没有 "loop_groups"，
+    自动包装为单个 ARLoopGroup (loop_count=1)。
+    """
+    task_id: int = 0
+    task_name: str = "New Task"
+    loop_groups: List[ARLoopGroup] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "ARTask":
+        loop_groups = [ARLoopGroup.from_dict(lg) for lg in d.get("loop_groups", [])]
+        # 向后兼容旧格式: 如果无 loop_groups 但有 blocks，自动包装
+        if not loop_groups and d.get("blocks"):
+            blocks = [ARBlock.from_dict(b) for b in d.get("blocks", [])]
+            loop_groups = [ARLoopGroup(
+                loop_id=1, loop_name="Loop 1", loop_count=1,
+                blocks=blocks
+            )]
         return cls(
             task_id=d.get("task_id", 0),
             task_name=d.get("task_name", "New Task"),
-            blocks=blocks
+            loop_groups=loop_groups
         )
 
 
